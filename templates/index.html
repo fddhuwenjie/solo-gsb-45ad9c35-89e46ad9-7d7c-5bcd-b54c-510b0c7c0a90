@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>针织行式编译台</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <h1>针织行式编译台</h1>
+    <label class="caston">起针数
+      <input id="castOn" type="number" min="1" max="2000" value="24">
+    </label>
+    <span id="status" class="status"></span>
+  </div>
+  <div class="hint">
+    针法（消耗/产出）：<code>k</code> 1/1 · <code>p</code> 1/1 ·
+    <code>yo</code> 0/1 · <code>k2tog</code> 2/1 ｜
+    分组：<code>(…)xN</code> 可嵌套 ｜
+    行末重复：<code>*…*</code>（单次消耗须为正且整除余针，重复到行末）｜
+    片段：① 区写 <code>名称 = 针法序列</code>，行内用 <code>@名称</code>
+    引用（可相互/前向引用，片段内不写 <code>*…*</code>）｜
+    整行消耗必须恰好等于上一行针数，不得截断或补针
+  </div>
+</header>
+
+<main>
+  <section class="pane" id="srcPane">
+    <h2>① 片段定义 <span class="sub">（可选：名称 = 针法序列）</span></h2>
+    <div class="editor defs-editor">
+      <div id="defsGutter" class="gutter" aria-hidden="true"></div>
+      <textarea id="defs" spellcheck="false" wrap="off"
+        autocomplete="off" autocapitalize="off"></textarea>
+    </div>
+    <div id="defsInfo" class="defs-info"></div>
+    <h2 class="mt">② 行源码 <span class="sub">（每行一行针法，可用 @名称 引用片段）</span></h2>
+    <div class="editor src-editor">
+      <div id="gutter" class="gutter" aria-hidden="true"></div>
+      <textarea id="src" spellcheck="false" wrap="off"
+        autocomplete="off" autocapitalize="off"></textarea>
+    </div>
+  </section>
+
+  <section class="pane" id="rowsPane">
+    <h2>③ 展开结果 <span class="sub">（单击针法定位行内引用，点「溯」逐针追溯来源，点 ↗ 定位定义）</span></h2>
+    <div id="rows" class="rows"></div>
+  </section>
+
+  <section class="pane" id="chartPane">
+    <h2>④ 图解
+      <span class="sub">（第 1 行在底部，单击格元回到源码，双击定位定义）</span>
+      <button id="traceModeBtn" class="trace-mode-btn" type="button"
+        aria-pressed="false">🧭 追溯选择模式：关</button>
+    </h2>
+    <div id="chartWrap" class="chart-wrap">
+      <svg id="chart" xmlns="http://www.w3.org/2000/svg" role="img"
+           aria-label="针织图解"></svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw k"></i>k 下针</span>
+      <span><i class="sw p"></i>p 上针</span>
+      <span><i class="sw yo"></i>yo 挂线</span>
+      <span><i class="sw k2tog"></i>k2tog 二并一</span>
+    </div>
+  </section>
+</main>
+
+<section class="pane trace-pane" id="tracePane">
+  <h2>⑤ 逐针来源追溯
+    <span class="sub">（在 ③ 点「溯」或在 ④ 开启追溯选择模式后点格元；沿各行实际消耗逐针回溯到起针或 yo）</span>
+  </h2>
+  <div id="traceBody" class="trace-body">
+    <p class="trace-empty">尚未选择产出针。仅已计算通过的行可追溯；出错或未计算的行不能选择。</p>
+  </div>
+</section>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

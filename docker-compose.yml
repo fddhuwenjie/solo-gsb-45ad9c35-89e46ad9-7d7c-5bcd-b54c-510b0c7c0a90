@@ -1,0 +1,6 @@
+services:
+  knit-compiler:
+    build: .
+    ports:
+      - "8000:8000"   # 宿主机端口:容器端口，访问 http://localhost:8000
+    restart: unless-stopped
