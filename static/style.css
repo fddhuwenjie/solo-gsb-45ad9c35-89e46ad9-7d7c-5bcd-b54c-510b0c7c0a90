@@ -343,6 +343,14 @@ li.tt-li::before {
   border-radius: 3px;
   padding: 0 5px;
 }
+.tt-pending {
+  font-size: 10.5px;
+  color: #7a4b12;
+  background: #f8e3c8;
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.trace-more { margin: 2px 0; }
 .linkish {
   border: 0;
   background: transparent;
