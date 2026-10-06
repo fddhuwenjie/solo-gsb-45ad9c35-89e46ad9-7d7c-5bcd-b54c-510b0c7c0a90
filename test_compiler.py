@@ -484,6 +484,66 @@ class TestPredecessors(unittest.TestCase):
         self.assertEqual(row1[0]['pre'], [1, 2])
         self.assertEqual(row1[1]['pre'], [])
 
+    def test_legal_large_trace_back_to_every_cast_or_yo(self):
+        # 两轮「1 针扩到 2048 针，再逐行并回 1 针」。前端分段展开该追溯时，
+        # 覆盖节点会超过 6000；后端返回的每个针位仍必须带有完整针法和 pre。
+        expand_row = 'k (yo)x999 (yo)x524 (yo)x524'
+        sources = [expand_row]
+        target = 1024
+        while target >= 1:
+            if target == 1024:
+                sources.append('((k2tog)x512)x2')
+            else:
+                sources.append('(k2tog)x%d' % target)
+            target //= 2
+        sources += [expand_row]
+        target = 1024
+        while target >= 1:
+            if target == 1024:
+                sources.append('((k2tog)x512)x2')
+            else:
+                sources.append('(k2tog)x%d' % target)
+            target //= 2
+
+        r = compile_rows(1, sources)
+        self.assertEqual(len(r['rows']), 24)
+        self.assertTrue(all(row['status'] == 'ok' for row in r['rows']))
+        self.assertEqual([row['out'] for row in r['rows'][:12]],
+                         [2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1])
+        self.assertEqual([row['out'] for row in r['rows'][12:]],
+                         [2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1])
+
+        def collect_sources(row_no, pos, seen=None):
+            if seen is None:
+                seen = {'cast': set(), 'yo': set(), 'nodes': 0}
+            row = r['rows'][row_no - 1]
+            st = row['stitches'][pos - 1]
+            self.assertIn(st['sym'], ('k', 'yo', 'k2tog'))
+            self.assertIn('pre', st)
+            seen['nodes'] += 1
+            if st['sym'] == 'yo':
+                seen['yo'].add((row_no, pos))
+                return seen
+            if row_no == 1:
+                seen['cast'].update(st['pre'])
+                return seen
+            for pre in st['pre']:
+                collect_sources(row_no - 1, pre, seen)
+            return seen
+
+        sources_for_last = collect_sources(24, 1)
+        self.assertEqual(sources_for_last['cast'], {1})
+        first_round_yos = {(1, pos) for pos in range(2, 2049)}
+        second_round_yos = {(13, pos) for pos in range(2, 2049)}
+        self.assertEqual(sources_for_last['yo'],
+                         first_round_yos | second_round_yos)
+        self.assertEqual(sources_for_last['nodes'], 8190)
+
+        first_round_target = collect_sources(12, 1)
+        self.assertEqual(first_round_target['cast'], {1})
+        self.assertEqual(first_round_target['yo'], first_round_yos)
+        self.assertEqual(first_round_target['nodes'], 4095)
+
     def test_error_and_blocked_rows_have_no_pre(self):
         r = run(4, 'k k', 'k k k k')
         self.assertEqual(r['rows'][0]['status'], 'error')

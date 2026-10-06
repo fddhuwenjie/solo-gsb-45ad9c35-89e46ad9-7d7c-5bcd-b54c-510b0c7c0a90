@@ -17,7 +17,7 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const LINE_H = 20;          // 与 CSS 中 textarea 行高一致
 const MAX_CHIPS = 400;      // 展开结果中最多渲染的针法标记数
 const MAX_CELLS = 1000;     // 图解中每行最多渲染的格数（超出画省略号）
-const MAX_TRACE_NODES = 6000; // 追溯树最多覆盖的针位（超出则文字提示）
+const TRACE_SEGMENT_NODES = 6000; // 文字树每段最多加入的节点数；可继续展开，不截断来源
 
 const SYM_NAME = { k: 'k 下针', p: 'p 上针', yo: 'yo 挂线', k2tog: 'k2tog 二并一' };
 
@@ -49,10 +49,10 @@ let lastData = null;
 let reqSeq = 0;
 
 /* 逐针追溯状态：
-   trace = {row, pos, tree, castLeaves, yoLeaves, truncated, nodeCount}
-   或 null（未选择 / 已因编辑清除）。tree 节点：
-     {row, pos, sym, st, children:[node...], kind:'stitch'|'cast'|'yo',
-      color, inChart}  row=0 表示起针行 */
+   trace = {row, pos, root, nodeCount, complete, castLeaves, yoLeaves}
+   树按段惰性展开：node.children 只包含已展开段中的针位；遇到 stitch 且
+   expanded=false 时，它的文字行是可继续展开的边界，不能被当作来源已完整。
+   每个节点都带实际 st / kind / inChart，不生成无针法数据的占位节点。 */
 let trace = null;
 let traceMode = false;   // 图解「追溯选择模式」：开启后点格元选择追溯目标
 let chartGeom = null;    // 最近一次图解几何 {cell, left, top, n, yOf}
@@ -364,9 +364,12 @@ function renderChart(data) {
   const n = rows.length;
   const maxOut = Math.max(data.castOn, 1,
     ...rows.map(r => (r.status === 'ok' ? r.stitches.length : 0)));
+  const shownMax = Math.min(maxOut, MAX_CELLS);
   const cell = maxOut > 300 ? 10 : maxOut > 120 ? 14 : 22;
-  const LEFT = 46, RIGHT = 70, TOP = 8, BOTTOM = 30;
-  const width = LEFT + maxOut * cell + RIGHT;
+  const LEFT = 46;
+  const RIGHT = maxOut > MAX_CELLS ? 130 : 70;
+  const TOP = 8, BOTTOM = 30;
+  const width = LEFT + shownMax * cell + RIGHT;
   const height = TOP + n * cell + BOTTOM;
 
   chartEl.setAttribute('width', width);
@@ -410,7 +413,8 @@ function renderChart(data) {
       }
       // 右侧产出针数
       const outLab = svgEl('text', {
-        x: LEFT + Math.min(row.stitches.length, MAX_CELLS) * cell + 8,
+        x: LEFT + shown * cell +
+          (row.stitches.length > MAX_CELLS ? 68 : 8),
         y: y + cell / 2, 'dominant-baseline': 'central',
         'font-size': 11, fill: '#8a8378',
       });
@@ -418,7 +422,7 @@ function renderChart(data) {
       chartEl.append(outLab);
     } else if (row.status === 'error') {
       const band = svgEl('rect', {
-        x: LEFT, y: y + 1, width: maxOut * cell, height: cell - 2,
+        x: LEFT, y: y + 1, width: shownMax * cell, height: cell - 2,
         fill: '#fbe4e4', stroke: '#e0a3a0', rx: 3,
       });
       const t = svgEl('text', {
@@ -429,7 +433,7 @@ function renderChart(data) {
       chartEl.append(band, t);
     } else {
       const band = svgEl('rect', {
-        x: LEFT, y: y + 1, width: maxOut * cell, height: cell - 2,
+        x: LEFT, y: y + 1, width: shownMax * cell, height: cell - 2,
         fill: '#f2f2f2', stroke: '#d5d5d5', 'stroke-dasharray': '4 3', rx: 3,
       });
       const t = svgEl('text', {
@@ -527,6 +531,7 @@ srcEl.addEventListener('click', () => markActiveRow(cursorRow()));
 traceModeBtn.addEventListener('click', () => setTraceMode(!traceMode));
 traceBodyEl.addEventListener('click', ev => {
   if (ev.target.closest('.trace-clear')) clearTrace();
+  if (ev.target.closest('.trace-continue')) continueTrace();
 });
 
 // 行卡片 / 图解中的点击：
@@ -581,13 +586,13 @@ function rowOk(rowNo) {
 /* 选择追溯目标：只有 status=ok 且针位合法的行可追溯；
    出错 / 未计算行在图解与展开结果中根本没有可选格元，这里再兜底校验。 */
 function startTrace(rowNo, pos) {
+  if (!Number.isInteger(rowNo) || !Number.isInteger(pos)) {
+    flashTraceDenied('请填写有效的行号与针位（正整数）。');
+    return;
+  }
   const r = rowOk(rowNo);
   if (!r || !Array.isArray(r.stitches)) {
     flashTraceDenied('该行出错或未计算，不能选择追溯；修正后可依新结果重新选择。');
-    return;
-  }
-  if (!Number.isInteger(rowNo) || !Number.isInteger(pos)) {
-    flashTraceDenied('请填写有效的行号与针位（正整数）。');
     return;
   }
   if (pos < 1 || pos > r.stitches.length) {
@@ -596,78 +601,128 @@ function startTrace(rowNo, pos) {
     return;
   }
 
-  let truncated = false;
-  let nodeCount = 0;
-  const hitLimit = () => {
-    nodeCount += 1;
-    if (nodeCount > MAX_TRACE_NODES) { truncated = true; return true; }
-    return false;
-  };
-
-  const build = (curRow, curPos) => {
-    const node = {
-      row: curRow, pos: curPos,
-      kind: 'stitch', children: [], color: null, inChart: true, st: null,
-    };
-    if (hitLimit()) return node;
-    const cur = rowOk(curRow);
-    if (!cur) return node;
-    const st = cur.stitches[curPos - 1];
-    node.st = st;
-    node.inChart = curPos <= MAX_CELLS;
-    if (!st) return node; // 防御：针位在新结果中已不存在
-    if (st.sym === 'yo') {
-      node.kind = 'yo';
-      return node; // yo 没有输入：新增针，回溯终止
-    }
-    if (curRow === 1) {
-      for (const p of (st.pre || [])) {
-        if (hitLimit()) break;
-        node.children.push({
-          row: 0, pos: p, kind: 'cast', children: [],
-          color: null, inChart: p <= MAX_CELLS, st: null,
-        });
-      }
-      return node;
-    }
-    if (truncated) return node;
-    for (const p of (st.pre || [])) {
-      node.children.push(build(curRow - 1, p));
-      if (truncated) break;
-    }
-    return node;
-  };
-
-  const tree = build(rowNo, pos);
-  const castLeaves = [];
-  const yoLeaves = [];
-  // 按从左到右的顺序给来源分支（叶子）编号并配色
-  let leafSeq = 0;
-  const assign = node => {
-    if (node.kind === 'cast' || node.kind === 'yo') {
-      node.color = TRACE_COLORS[leafSeq % TRACE_COLORS.length];
-      node.leafNo = leafSeq + 1;
-      leafSeq += 1;
-      (node.kind === 'cast' ? castLeaves : yoLeaves).push(node);
-      return;
-    }
-    node.children.forEach(assign);
-    node.color = node.children.length
-      ? node.children[0].color
-      : TRACE_COLORS[leafSeq % TRACE_COLORS.length];
-  };
-  assign(tree);
-
   trace = {
-    row: rowNo, pos, tree, castLeaves, yoLeaves,
-    truncated, nodeCount: Math.min(nodeCount, MAX_TRACE_NODES),
+    row: rowNo,
+    pos,
+    root: makeTraceNode(rowNo, pos),
+    nodeCount: 1,
+    complete: false,
+    castLeaves: [],
+    yoLeaves: [],
   };
+  expandTraceSegment();
   renderTrace();
   const ri = document.getElementById('traceRowInp');
   const pi = document.getElementById('tracePosInp');
   if (ri) ri.value = rowNo;
   if (pi) pi.value = pos;
-  traceBodyEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  // 不强制把页面滚到面板：从展开列表点「溯」时保持原有阅读位置；
+  // 直接输入行号/针位时，面板就在输入框上方，仍然可见。
+}
+
+function makeTraceNode(rowNo, pos) {
+  const node = {
+    row: rowNo,
+    pos,
+    kind: 'stitch',
+    st: null,
+    children: [],
+    expanded: false,
+    color: null,
+    inChart: false,
+  };
+  if (rowNo === 0) {
+    node.kind = 'cast';
+    node.expanded = true;
+    node.inChart = pos <= MAX_CELLS;
+    return node;
+  }
+
+  const row = rowOk(rowNo);
+  const st = row && row.stitches[pos - 1];
+  if (!st) return null; // 防御：针位在新结果中已不存在
+  node.st = st;
+  node.inChart = pos <= MAX_CELLS;
+  if (st.sym === 'yo') {
+    node.kind = 'yo';
+    node.expanded = true; // yo 没有输入：新增针，回溯终止
+  }
+  return node;
+}
+
+function expandTraceNode(node) {
+  if (node.expanded || node.kind !== 'stitch' || !node.st) return 0;
+  const children = [];
+  if (node.row === 1) {
+    for (const p of (node.st.pre || [])) {
+      children.push(makeTraceNode(0, p));
+    }
+  } else {
+    for (const p of (node.st.pre || [])) {
+      children.push(makeTraceNode(node.row - 1, p));
+    }
+  }
+  node.children = children.filter(Boolean);
+  node.expanded = true;
+  return node.children.length;
+}
+
+function firstUnexpandedNode(node) {
+  if (node.kind === 'stitch' && !node.expanded) return node;
+  for (const ch of node.children) {
+    const found = firstUnexpandedNode(ch);
+    if (found) return found;
+  }
+  return null;
+}
+
+function expandTraceSegment() {
+  let added = 0;
+  let budget = TRACE_SEGMENT_NODES;
+  while (budget > 0) {
+    const node = firstUnexpandedNode(trace.root);
+    if (!node) {
+      trace.complete = true;
+      break;
+    }
+    const childCount = expandTraceNode(node);
+    trace.nodeCount += childCount;
+    added += childCount;
+    budget -= childCount;
+  }
+  if (!firstUnexpandedNode(trace.root)) trace.complete = true;
+  assignTraceColors();
+  return added;
+}
+
+function continueTrace() {
+  if (!trace || trace.complete) return;
+  expandTraceSegment();
+  renderTrace();
+}
+
+function assignTraceColors() {
+  trace.castLeaves = [];
+  trace.yoLeaves = [];
+  let leafSeq = 0;
+  const collapsedColor = '#8a8378';
+
+  const visit = node => {
+    if (node.kind === 'cast' || node.kind === 'yo') {
+      node.color = TRACE_COLORS[leafSeq % TRACE_COLORS.length];
+      node.leafNo = leafSeq + 1;
+      leafSeq += 1;
+      (node.kind === 'cast' ? trace.castLeaves : trace.yoLeaves).push(node);
+      return;
+    }
+    if (!node.expanded || !node.children.length) {
+      node.color = collapsedColor;
+      return;
+    }
+    node.children.forEach(visit);
+    node.color = node.children[0].color;
+  };
+  visit(trace.root);
 }
 
 function clearTrace({ silent } = {}) {
@@ -703,47 +758,59 @@ function renderTrace() {
     return;
   }
 
-  // 1) 摘要：目标 + 起针/yo 两个来源分支清单
-  const targetSt = trace.tree.st;
+  const targetSt = trace.root.st;
+  const sourceText = trace.complete
+    ? `${trace.castLeaves.length} 个起针来源 · ${trace.yoLeaves.length} 个 yo 新针来源`
+    : `已展开 ${trace.castLeaves.length} 个起针来源、${trace.yoLeaves.length} 个 yo 新针来源（尚未完整）`;
   const head = el('div', { class: 'trace-head' },
     el('span', { class: 'trace-target-name' },
       `目标：第 ${trace.row} 行 · 第 ${trace.pos} 针 · ${SYM_NAME[targetSt.sym]}`),
     el('span', { class: 'trace-count' },
-      `覆盖 ${trace.nodeCount} 个针位 · ${trace.castLeaves.length} 个起针来源 · ` +
-      `${trace.yoLeaves.length} 个 yo 新针来源`),
+      `累计显示 ${trace.nodeCount} 个针位 · ${sourceText}`),
     el('button', { class: 'trace-clear', type: 'button' }, '清除追溯'));
   traceBodyEl.append(head);
 
   const branchLine = el('div', { class: 'trace-branches' },
-    el('span', { class: 'tb-label' }, '来源分支：'));
+    el('span', { class: 'tb-label' },
+      trace.complete ? '来源分支：' : '已展开来源分支：'));
   trace.castLeaves.forEach(n => branchLine.append(leafTag(n, '起针 ' + n.pos)));
   trace.yoLeaves.forEach(n =>
     branchLine.append(leafTag(n, `yo：第 ${n.row} 行第 ${n.pos} 针`)));
+  if (!trace.complete) {
+    branchLine.append(el('span', { class: 'branch-more' },
+      `其余来源在未展开边界之后，需继续追溯，当前并非完整来源。`));
+  }
   traceBodyEl.append(branchLine);
 
-  // 2) 逐跳树形文字（含图中未绘出的针位，照样全部列出）
+  // 逐跳树形文字按 DFS 分段展开；每个已展开节点的实际 pre 都完整列出。
   const treeWrap = el('div', { class: 'trace-tree' });
-  treeWrap.append(treeNodeLine(trace.tree, true));
+  treeWrap.append(treeNodeLine(trace.root, true));
   const ul = el('ol', { class: 'tt-children' });
-  trace.tree.children.forEach(ch => ul.append(renderTreeNode(ch)));
+  trace.root.children.forEach(ch => ul.append(renderTreeNode(ch)));
   treeWrap.append(ul);
   traceBodyEl.append(treeWrap);
 
-  const undrawn = countUndrawn(trace.tree);
+  const undrawn = countUndrawn(trace.root);
   if (undrawn) {
     traceBodyEl.append(el('p', { class: 'trace-note' },
       `注：其中 ${undrawn} 个针位超出图解绘制上限（每行 ${MAX_CELLS} 格），` +
-      '未在图中连线，已在上方逐针文字列出。'));
+      '未在图中连线，已在上方逐针文字列出；也可用下方行号、针位直接选择。'));
   }
-  if (trace.truncated) {
+  if (!trace.complete) {
     traceBodyEl.append(el('p', { class: 'trace-note warn' },
-      `⚠ 追溯覆盖针位超过 ${MAX_TRACE_NODES}，更远的前驱未继续展开；` +
-      '已列出的部分仍为完整的逐针前驱关系。'));
+      `文字树已按 ${TRACE_SEGMENT_NODES} 个针位为一段展开；灰色边界仍带实际针法数据，` +
+      '但其前驱尚未在本段展开。继续展开即可沿实际前驱追到全部起针或 yo 来源，' +
+      '不应把当前已展开分支误认为来源已完整。'));
+    traceBodyEl.append(el('button', {
+      class: 'trace-continue', type: 'button',
+    }, `继续展开下一段（再追 ${TRACE_SEGMENT_NODES} 个针位）`));
+  } else {
+    traceBodyEl.append(el('p', { class: 'trace-note complete' },
+      '追溯已完整：全部实际前驱均已追到起针针位或 yo 新针来源。'));
   }
 
   traceBodyEl.append(traceSelector());
 
-  // 3) 展开列表 & 图解标记
   markChips();
   drawTraceOverlay();
 }
@@ -802,7 +869,24 @@ function treeNodeLine(node, isRoot) {
     }, swatch,
       el('b', null, `第 ${node.row} 行第 ${node.pos} 针 · yo 挂线`),
       el('span', { class: 'tt-note' }, '（无输入针：此处产生的新针，回溯终止）'));
+    if (!node.inChart) line.append(el('span', { class: 'tt-undrawn' }, '图中未绘出'));
     appendLocJump(line, node, '定位');
+    return line;
+  }
+  if (!node.expanded) {
+    const line = el('div', {
+      class: 'tt-node collapsed',
+      title: nodeLoc(node.st) + '；本段尚未展开其前驱',
+    }, swatch,
+      el('b', null, `第 ${node.row} 行第 ${node.pos} 针 · ${SYM_NAME[node.st.sym]}`),
+      el('span', { class: 'tt-rel' },
+        node.st.pre.length === 2
+          ? `实际并入上一行第 ${node.st.pre[0]}、${node.st.pre[1]} 针`
+          : `实际承接上一行第 ${node.st.pre[0]} 针`),
+      el('span', { class: 'tt-collapsed' }, '前驱未展开 · 继续追溯'));
+    if (!node.inChart) line.append(el('span', { class: 'tt-undrawn' }, '图中未绘出'));
+    appendLocJump(line, node, '定位');
+    if (node.st.def) appendDefJump(line, node);
     return line;
   }
   const cls = 'tt-node' + (isRoot ? ' root' : '');
@@ -814,14 +898,16 @@ function treeNodeLine(node, isRoot) {
         : `承接上一行第 ${node.st.pre[0]} 针`));
   if (!node.inChart) line.append(el('span', { class: 'tt-undrawn' }, '图中未绘出'));
   appendLocJump(line, node, '定位');
-  if (node.st.def) {
-    line.append(el('button', {
-      class: 'defjump linkish', type: 'button',
-      'data-def-line': node.st.def.line,
-      'data-def-s': node.st.def.s, 'data-def-e': node.st.def.e,
-    }, '↗ 定义'));
-  }
+  if (node.st.def) appendDefJump(line, node);
   return line;
+}
+
+function appendDefJump(line, node) {
+  line.append(el('button', {
+    class: 'defjump linkish', type: 'button',
+    'data-def-line': node.st.def.line,
+    'data-def-s': node.st.def.s, 'data-def-e': node.st.def.e,
+  }, '↗ 定义'));
 }
 
 function appendLocJump(line, node, label) {
@@ -863,7 +949,7 @@ function markChips() {
       node.children.forEach(ch => visit(ch, 'trace-ancestor'));
     }
   };
-  visit(trace.tree, 'trace-target');
+  visit(trace.root, 'trace-target');
 }
 
 /* ---- SVG 覆盖层：来源分支连线 + 起针/yo 标记 ---- */
@@ -891,9 +977,9 @@ function drawTraceOverlay() {
   if (caption) caption.setAttribute('y', castY + 17);
 
   function addEdges(node) {
-    // 本针超出绘制上限时，它与所有更远的前驱都不在图上：整支剪去，
-    // 避免出现连不到目标针的悬空线段（这些针位仍由文字面板列出）。
-    if (node.kind === 'stitch' && !node.inChart) return;
+    // 未展开边界与其所有更远前驱都尚未在文字树中展开，整支暂不连线；
+    // 边界针位本身仍描灰框，继续展开后才会画出后续实际来源。
+    if (node.kind === 'stitch' && !node.expanded) return;
     node.children.forEach(ch => {
       if (ch.inChart) {
         const key = [node.row, node.pos, ch.row, ch.pos].join(',');
@@ -944,7 +1030,7 @@ function drawTraceOverlay() {
     if (node.inChart) {
       const x = cx(node.pos);
       const y = chartGeom.yOf(node.row - 1);
-      const isRoot = node === trace.tree;
+      const isRoot = node === trace.root;
       markLayer.append(svgEl('rect', {
         x: x - cell / 2 + 1.5, y: y + 1.5,
         width: cell - 3, height: cell - 3, rx: 3,
@@ -963,8 +1049,8 @@ function drawTraceOverlay() {
     node.children.forEach(mark);
   }
 
-  addEdges(trace.tree);
-  mark(trace.tree);
+  addEdges(trace.root);
+  mark(trace.root);
   chartEl.append(overlay);
 }
 

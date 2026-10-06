@@ -310,6 +310,7 @@ main {
   border-radius: 50%;
   margin-right: 2px;
 }
+.branch-more { color: var(--accent); font-size: 11.5px; font-weight: 600; }
 
 .trace-tree { font-size: 12.5px; }
 ol.tt-children {
@@ -335,6 +336,26 @@ li.tt-li::before {
 .tt-node.root { background: #fdf1e3; }
 .tt-node.terminal { color: #1b5e20; }
 .tt-node.yo-term { color: var(--yo-fg); }
+.tt-node.collapsed { background: #f1f0ed; color: var(--muted); }
+.tt-collapsed {
+  font-size: 10.5px;
+  color: #ffffff;
+  background: var(--muted);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.trace-continue {
+  margin-top: 8px;
+  border: 1px solid var(--accent);
+  background: #fdf1e3;
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 4px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.trace-continue:hover { filter: brightness(.97); }
 .tt-rel, .tt-note { color: var(--muted); font-size: 11.5px; }
 .tt-undrawn {
   font-size: 10.5px;
@@ -355,6 +376,7 @@ li.tt-li::before {
 .linkish:hover { text-decoration: underline; }
 .trace-note { color: var(--muted); font-size: 12px; margin: 8px 2px 0; }
 .trace-note.warn { color: var(--accent); font-weight: 600; }
+.trace-note.complete { color: var(--ok); font-weight: 600; }
 
 .trace-selector {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
